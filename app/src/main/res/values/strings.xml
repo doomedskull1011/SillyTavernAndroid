@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SillyTavern</string>
+    <string name="channel_name">SillyTavern Server</string>
+</resources>

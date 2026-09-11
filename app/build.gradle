@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystoreProps.load(new FileInputStream(keystorePropsFile))
+}
+
+android {
+    namespace 'com.sillytavern.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.sillytavern.app'
+        minSdk 24
+        targetSdk 34
+        versionCode 2
+        versionName '1.1.0-st1.18.0'
+    }
+
+    signingConfigs {
+        release {
+            storeFile keystoreProps['storeFile'] ? rootProject.file(keystoreProps['storeFile']) : null
+            storePassword keystoreProps['storePassword']
+            keyAlias keystoreProps['keyAlias']
+            keyPassword keystoreProps['keyPassword']
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    // The payload zip is already compressed; store it as-is.
+    aaptOptions {
+        noCompress 'zip'
+    }
+
+    // We ship large binaries; allow the build.
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+}

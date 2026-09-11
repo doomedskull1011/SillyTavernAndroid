@@ -1,0 +1,31 @@
+# Android / Gradle
+.gradle/
+build/
+app/build/
+local.properties
+.cxx/
+.externalNativeBuild/
+captures/
+*.iml
+.idea/
+
+# Signing secrets
+keystore.properties
+release.keystore
+*.keystore
+*.jks
+
+# Node dependencies and SillyTavern runtime/user data
+payload/sillytavern/node_modules/
+payload/sillytavern/backups/
+payload/sillytavern/data/*
+!payload/sillytavern/data/.gitkeep
+
+# Generated runtime/binary staging areas
+runtime/debs/
+runtime/extracted/
+runtime/gitstage/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
