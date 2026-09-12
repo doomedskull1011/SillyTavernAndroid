@@ -1,13 +1,15 @@
-# SillyTavernAndroid
+# SillyTavernAndroid (ST-Manager)
 
 SillyTavernAndroid packages [SillyTavern](https://github.com/SillyTavern/SillyTavern) 1.18.0 as a self-contained Android app. It runs a real Node.js server inside the app and shows the SillyTavern web UI in a full-screen WebView.
+
+Version 2.0 turns the app into **ST-Manager**: a manager for up to **6 SillyTavern instances** running side by side on different ports, each with its own launcher icon, private data, backup import and on-device update tooling. Because SillyTavern itself can now be updated on-device straight from GitHub, the app version no longer tracks the bundled SillyTavern version.
 
 The current release is built as:
 
 - Package: `com.sillytavern.app`
-- Version: `1.1.0-st1.18.0` (`versionCode 2`)
-- APK: `app-release.apk` / release asset `SillyTavernAndroid-v1.1.0-st1.18.0.apk`
-- Size: about 167 MB
+- Version: `2.0.0` (`versionCode 5`)
+- APK: `SillyTavernAndroid-v2.0.0.apk`
+- Size: about 171 MB
 - Android support: Android 7.0+ / API 24+
 - CPU support: arm64-v8a only
 
@@ -19,7 +21,7 @@ https://github.com/doomedskull1011/SillyTavernAndroid/releases/latest
 
 Direct asset for the current release:
 
-https://github.com/doomedskull1011/SillyTavernAndroid/releases/download/v1.1.0-st1.18.0/SillyTavernAndroid-v1.1.0-st1.18.0.apk
+https://github.com/doomedskull1011/SillyTavernAndroid/releases/download/v2.0.0/SillyTavernAndroid-v2.0.0.apk
 
 ## What is included
 
@@ -34,11 +36,23 @@ This is not a thin web wrapper around a remote server. The app bundles the runti
 
 ## Features
 
-- Runs SillyTavern locally on `127.0.0.1:8000`
+### ST-Manager (multi-instance)
+
+- Up to 6 instances, each on its own port (`8000`-`8005`) with its own private data (characters, chats, settings)
+- All instances share one extracted SillyTavern payload, so extra instances cost almost no storage
+- Creating an instance adds a launcher icon (`ST-Inst2`, ...); instance 1 keeps the classic `SillyTavern` icon
+- Per-instance RAM usage, polled live from `/proc/<pid>/status`
+- Per-instance backup import from a SillyTavern `.zip` backup (system file picker)
+- Header toolbar at the top, right beside the `ST-Manager` title, with **Repair**, **Packages** and **Update ST** actions that apply to the shared payload
+- On-device **Update ST** from GitHub: choose **Latest** (stable release tag) or **Staging** (development branch); the payload becomes a shallow git checkout and dependencies are refreshed with a bundled npm CLI
+- **Packages** runs `npm install` against the current payload; **Repair** restores the bundled version as a safety net
+
+### Core
+
+- Runs SillyTavern locally on `127.0.0.1`, localhost-only
 - Full-screen WebView UI once the local server is ready
 - First-launch payload extraction with progress display
-- Foreground service notification while the server is running
-- Stop action in the notification
+- Foreground service notification summarizing all running instances, with a stop-all action
 - Android system file picker support for SillyTavern file inputs
 - Downloads/exports are saved to `Downloads/SillyTavern/`
 - User data is kept in app-private storage and preserved across payload upgrades
@@ -85,10 +99,10 @@ Later launches are much faster because extraction is skipped and caches are reus
 
 ## Data and privacy
 
-- The server binds to localhost only.
-- Chats, characters, settings, and other SillyTavern data live under the app's private storage.
-- Uninstalling the app deletes the app-private SillyTavern data.
-- Use SillyTavern's export/backup features if you want copies outside the app.
+- Servers bind to localhost only.
+- Chats, characters, settings, and other SillyTavern data live under the app's private storage, one `instances/instN/data` directory per instance.
+- Uninstalling the app deletes the app-private SillyTavern data of all instances.
+- Use SillyTavern's export/backup features if you want copies outside the app; ST-Manager can import those backup zips into any instance.
 - Exported files are written to `Downloads/SillyTavern/`.
 
 ## Permissions
@@ -102,26 +116,41 @@ The app requests only the permissions needed for its local server and Android in
 
 ## How it works
 
-The Android wrapper has four main parts:
+The Android wrapper has these main parts:
 
-- `MainActivity.java`
-  - Builds the WebView UI
-  - Shows extraction/startup progress
-  - Opens Android file pickers for web file inputs
-  - Routes normal HTTP(S) downloads into Android storage
-  - Waits for `http://127.0.0.1:8000` to respond before showing the UI
+- `ManagerActivity.java` (ST-Manager)
+  - Launcher entry point listing all instances with state and RAM usage
+  - Header toolbar beside the title with the shared-payload actions: Repair, Packages and Update ST
+  - Instance create/delete (launcher icons via manifest activity-aliases toggled at runtime)
+  - Per-instance backup import (SAF zip picker)
+
+- `InstanceActivity.java` + `Inst1Activity`..`Inst6Activity.java`
+  - WebView host for one instance; the subclasses are the alias targets
+  - Waits for the instance's port to respond before showing the UI
+  - Opens Android file pickers for web file inputs and routes downloads
+  - `MainActivity.java` is kept as a legacy redirect to instance 1 for old shortcuts
 
 - `ServerService.java`
-  - Runs the bundled Node.js executable as a foreground service
-  - Sets environment variables such as `HOME`, `TMPDIR`, `LD_LIBRARY_PATH`, and git-related paths
-  - Mirrors server output to a log file for startup status/debugging
-  - Provides a persistent notification with a stop action
+  - Runs one bundled Node.js process per started instance as a foreground service
+  - Shared payload with per-instance `--port`, `--dataRoot`, `--configPath`
+  - Mirrors each server's output to its own log file
+  - Persistent notification summarizing running instances with a stop-all action
+
+- `InstanceManager.java`
+  - Instance registry (`files/instances.json`), per-instance directories/config
+  - Migration from the pre-2.0 single-instance layout
 
 - `PayloadExtractor.java`
-  - Extracts `payload.zip` and `git.zip` from app assets
+  - Extracts `payload.zip` (shared code), `git.zip` and `npm.zip` from app assets
   - Uses parallel ZIP extraction for faster first launch
-  - Tracks payload/git versions with marker files
-  - Preserves the SillyTavern `data/` directory across app updates
+  - Tracks payload/git/npm versions with marker files
+
+- `StUpdater.java` + `UpdateActivity.java`
+  - On-device git fetch/checkout of upstream release tags or the staging branch
+  - `npm install` through the bundled npm CLI; progress log UI
+
+- `Env.java`
+  - Shared environment setup (HOME/TMPDIR/LD_LIBRARY_PATH/git) for spawned processes
 
 - `DownloadBridge.java`
   - Bridges browser downloads that use `blob:` or `data:` URLs
@@ -133,7 +162,7 @@ The Android wrapper has four main parts:
 ```text
 app/                    Android app module
   src/main/java/...     WebView host, server service, extractor, download bridge
-  src/main/assets/      Bundled payload.zip and git.zip (Git LFS)
+  src/main/assets/      Bundled payload.zip, git.zip and npm.zip (Git LFS)
   src/main/jniLibs/     Native runtime libraries (Git LFS)
 payload/sillytavern/    Bundled SillyTavern source and default content
 runtime/                Scripts used to stage/patch runtime dependencies

@@ -19,20 +19,26 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Unpacks bundled asset zips (SillyTavern payload, git runtime) into
- * app-private storage. Extraction is parallelized across CPU cores with
- * random-access ZipFile reads. Marker files record versions so updated
- * zips re-extract on upgrade. The SillyTavern user data directory
- * (sillytavern/data) is preserved across payload upgrades.
+ * Unpacks bundled asset zips (SillyTavern payload, git runtime, npm
+ * runtime) into app-private storage. Extraction is parallelized across CPU
+ * cores with random-access ZipFile reads. Marker files record versions so
+ * updated zips re-extract on upgrade.
+ *
+ * The payload is extracted once as the SHARED server code for all
+ * instances (files/payload). User data lives per instance under
+ * files/instances, so payload upgrades never touch user data.
  */
 public class PayloadExtractor {
 
     public static final String PAYLOAD_VERSION = "st-1.18.0-2";
     public static final String GIT_VERSION = "git-2.55.0-1";
+    public static final String NPM_VERSION = "npm-11.7.0-1";
     private static final String MARKER = "payload.version";
     private static final String GIT_MARKER = "git.version";
+    private static final String NPM_MARKER = "npm.version";
     private static final String ZIP_NAME = "payload.zip";
     private static final String GIT_ZIP_NAME = "git.zip";
+    private static final String NPM_ZIP_NAME = "npm.zip";
 
     private static final int COPY_BUFFER = 256 * 1024;
 
@@ -41,13 +47,19 @@ public class PayloadExtractor {
     }
 
     public static boolean isExtracted(Context context) {
-        return markerMatches(new File(context.getFilesDir(), MARKER), PAYLOAD_VERSION);
+        return markerMatches(new File(context.getFilesDir(), MARKER), PAYLOAD_VERSION)
+                && new File(InstanceManager.payloadDir(context), "server.js").isFile();
     }
 
     public static boolean isGitExtracted(Context context) {
         return markerMatches(new File(context.getFilesDir(), GIT_MARKER), GIT_VERSION)
                 && new File(context.getFilesDir(), "git/etc/tls/cert.pem").isFile()
                 && new File(context.getFilesDir(), "git/share/git-core/templates").isDirectory();
+    }
+
+    public static boolean isNpmExtracted(Context context) {
+        return markerMatches(new File(context.getFilesDir(), NPM_MARKER), NPM_VERSION)
+                && new File(context.getFilesDir(), "npm/bin/npm-cli.js").isFile();
     }
 
     private static boolean markerMatches(File marker, String expected) {
@@ -67,59 +79,23 @@ public class PayloadExtractor {
     }
 
     /**
-     * Extracts the main SillyTavern payload, preserving an existing
-     * sillytavern/data directory (user characters, chats, settings).
-     * A pre-baked webpack cache shipped inside the payload's data dir is
-     * merged into the preserved data dir.
+     * Extracts the main SillyTavern payload as the shared server code at
+     * files/payload. The zip has a top-level "sillytavern/" folder which is
+     * renamed to "payload" after extraction. User data is stored per
+     * instance elsewhere, so no data preservation is needed here.
      */
     public static void extract(Context context, ProgressListener listener) throws Exception {
         File filesDir = context.getFilesDir();
-        File stDir = new File(filesDir, "sillytavern");
-        File existingData = new File(stDir, "data");
-        File savedData = new File(filesDir, ".data-backup");
-        File freshWebpackTmp = new File(filesDir, ".webpack-tmp");
+        File legacyDir = new File(filesDir, "sillytavern");
+        File payloadDir = InstanceManager.payloadDir(context);
 
-        boolean hasUserData = existingData.isDirectory() && containsUserContent(existingData);
-
-        if (hasUserData) {
-            deleteRecursively(savedData);
-            if (!existingData.renameTo(savedData)) {
-                copyRecursively(existingData, savedData);
-                deleteRecursively(existingData);
-            }
-        }
-
-        deleteRecursively(stDir);
-        stDir.mkdirs();
+        InstanceManager.deleteRecursively(payloadDir);
+        InstanceManager.deleteRecursively(legacyDir);
         extractAssetZip(context, ZIP_NAME, filesDir, null, null, null, listener);
 
-        if (hasUserData) {
-            // Keep the pre-baked webpack cache from the fresh payload, but
-            // restore everything else from the user's data directory.
-            File freshWebpack = new File(stDir, "data/_webpack");
-            File restoredData = new File(stDir, "data");
-            deleteRecursively(freshWebpackTmp);
-            if (freshWebpack.isDirectory()
-                    && !freshWebpack.renameTo(freshWebpackTmp)) {
-                copyRecursively(freshWebpack, freshWebpackTmp);
-                deleteRecursively(freshWebpack);
-            }
-            deleteRecursively(restoredData);
-            if (!savedData.renameTo(restoredData)) {
-                copyRecursively(savedData, restoredData);
-                deleteRecursively(savedData);
-            }
-            if (freshWebpackTmp.isDirectory()) {
-                File targetWebpack = new File(restoredData, "_webpack");
-                deleteRecursively(targetWebpack);
-                if (!freshWebpackTmp.renameTo(targetWebpack)) {
-                    copyRecursively(freshWebpackTmp, targetWebpack);
-                    deleteRecursively(freshWebpackTmp);
-                }
-            }
+        if (!legacyDir.renameTo(payloadDir)) {
+            throw new Exception("could not move extracted payload into place");
         }
-
-        writeDefaultConfig(stDir);
         writeMarker(new File(filesDir, MARKER), PAYLOAD_VERSION);
         if (listener != null) {
             listener.onProgress(-1, -1, "done");
@@ -133,11 +109,62 @@ public class PayloadExtractor {
     public static void extractGit(Context context) throws Exception {
         File filesDir = context.getFilesDir();
         File gitDir = new File(filesDir, "git");
-        deleteRecursively(gitDir);
+        InstanceManager.deleteRecursively(gitDir);
         gitDir.mkdirs();
         extractAssetZip(context, GIT_ZIP_NAME, gitDir, null, null,
                 new String[]{"bin/", "libexec/"}, null);
         writeMarker(new File(filesDir, GIT_MARKER), GIT_VERSION);
+    }
+
+    /**
+     * Extracts the npm CLI runtime (npm/bin/npm-cli.js and its node_modules)
+     * used by the on-device updater. Extracted lazily on first update.
+     */
+    public static void extractNpm(Context context) throws Exception {
+        File filesDir = context.getFilesDir();
+        File npmDir = new File(filesDir, "npm");
+        InstanceManager.deleteRecursively(npmDir);
+        extractAssetZip(context, NPM_ZIP_NAME, filesDir, null, null, null, null);
+        writeMarker(new File(filesDir, NPM_MARKER), NPM_VERSION);
+    }
+
+    /**
+     * Extracts an arbitrary zip file (e.g. a SillyTavern backup picked via
+     * the system file picker) into destDir with a zip-slip guard.
+     */
+    public static void extractZipFile(File zipFile, File destDir, ProgressListener listener) throws Exception {
+        destDir.mkdirs();
+        final String rootPath = destDir.getCanonicalPath();
+        try (ZipFile zip = new ZipFile(zipFile)) {
+            List<? extends ZipEntry> entries = Collections.list(zip.entries());
+            final int total = entries.size();
+            int done = 0;
+            byte[] buf = new byte[COPY_BUFFER];
+            for (ZipEntry entry : entries) {
+                if (entry.isDirectory()) {
+                    continue;
+                }
+                File out = new File(destDir, entry.getName());
+                if (!out.getCanonicalPath().startsWith(rootPath)) {
+                    continue; // zip-slip guard
+                }
+                File parent = out.getParentFile();
+                if (parent != null) {
+                    parent.mkdirs();
+                }
+                try (InputStream in = zip.getInputStream(entry);
+                     OutputStream fos = new FileOutputStream(out)) {
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        fos.write(buf, 0, n);
+                    }
+                }
+                done++;
+                if (listener != null && (done % 100 == 0 || done == total)) {
+                    listener.onProgress(done, total, entry.getName());
+                }
+            }
+        }
     }
 
     /**
@@ -240,86 +267,9 @@ public class PayloadExtractor {
         return false;
     }
 
-    /**
-     * A data dir counts as "user content" if it has anything beyond the
-     * pristine placeholders (.gitkeep and the pre-baked _webpack cache).
-     */
-    private static boolean containsUserContent(File dataDir) {
-        File[] children = dataDir.listFiles();
-        if (children == null) {
-            return false;
-        }
-        for (File child : children) {
-            String name = child.getName();
-            if (!".gitkeep".equals(name) && !"_webpack".equals(name)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Pre-seed a minimal config.yaml: never auto-open a browser (there is
-     * none usable on Android), keep the server localhost-only on port 8000.
-     */
-    private static void writeDefaultConfig(File stDir) throws Exception {
-        File config = new File(stDir, "config.yaml");
-        if (config.exists()) {
-            return;
-        }
-        String yaml = "# Generated by the Android wrapper. Edit via UI or delete to reset.\n"
-                + "port: 8000\n"
-                + "listen: false\n"
-                + "autorun: false\n"
-                + "autorunHostname: 'auto'\n";
-        try (OutputStream fos = new FileOutputStream(config)) {
-            fos.write(yaml.getBytes(StandardCharsets.UTF_8));
-        }
-    }
-
     private static void writeMarker(File marker, String version) throws Exception {
         try (OutputStream fos = new FileOutputStream(marker)) {
             fos.write(version.getBytes(StandardCharsets.UTF_8));
         }
-    }
-
-    private static void copyRecursively(File src, File dst) throws Exception {
-        if (src.isDirectory()) {
-            dst.mkdirs();
-            File[] children = src.listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    copyRecursively(child, new File(dst, child.getName()));
-                }
-            }
-        } else {
-            File parent = dst.getParentFile();
-            if (parent != null) {
-                parent.mkdirs();
-            }
-            try (InputStream in = new java.io.FileInputStream(src);
-                 OutputStream out = new FileOutputStream(dst)) {
-                byte[] buf = new byte[COPY_BUFFER];
-                int n;
-                while ((n = in.read(buf)) > 0) {
-                    out.write(buf, 0, n);
-                }
-            }
-        }
-    }
-
-    private static void deleteRecursively(File f) {
-        if (f == null || !f.exists()) {
-            return;
-        }
-        if (f.isDirectory()) {
-            File[] children = f.listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    deleteRecursively(child);
-                }
-            }
-        }
-        f.delete();
     }
 }

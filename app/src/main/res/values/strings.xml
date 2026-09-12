@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">SillyTavern</string>
-    <string name="channel_name">SillyTavern Server</string>
+    <string name="app_name">ST-Manager</string>
+    <string name="channel_name">SillyTavern Servers</string>
+    <string name="inst1_name">SillyTavern</string>
+    <string name="inst2_name">ST-Inst2</string>
+    <string name="inst3_name">ST-Inst3</string>
+    <string name="inst4_name">ST-Inst4</string>
+    <string name="inst5_name">ST-Inst5</string>
+    <string name="inst6_name">ST-Inst6</string>
 </resources>

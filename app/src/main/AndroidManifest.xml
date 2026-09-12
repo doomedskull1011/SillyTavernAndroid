@@ -16,8 +16,10 @@
         android:largeHeap="true"
         android:hardwareAccelerated="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <!-- ST-Manager is the main entry point. -->
         <activity
-            android:name=".MainActivity"
+            android:name=".ManagerActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
@@ -25,13 +27,119 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Legacy entry point: forwards old shortcuts to instance 1. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:noHistory="true"
+            android:excludeFromRecents="true" />
+
+        <!-- WebView host, opened from the manager with an instance id. -->
+        <activity
+            android:name=".InstanceActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- Alias targets: one real activity per instance id. -->
+        <activity android:name=".Inst1Activity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".Inst2Activity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".Inst3Activity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".Inst4Activity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".Inst5Activity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".Inst6Activity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- Launcher icons per instance. Only instance 1 ships enabled;
+             the rest are enabled at runtime when the instance is created. -->
+        <activity-alias
+            android:name=".Inst1Alias"
+            android:label="@string/inst1_name"
+            android:icon="@drawable/ic_launcher"
+            android:targetActivity=".Inst1Activity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".Inst2Alias"
+            android:label="@string/inst2_name"
+            android:icon="@drawable/ic_launcher"
+            android:targetActivity=".Inst2Activity"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".Inst3Alias"
+            android:label="@string/inst3_name"
+            android:icon="@drawable/ic_launcher"
+            android:targetActivity=".Inst3Activity"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".Inst4Alias"
+            android:label="@string/inst4_name"
+            android:icon="@drawable/ic_launcher"
+            android:targetActivity=".Inst4Activity"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".Inst5Alias"
+            android:label="@string/inst5_name"
+            android:icon="@drawable/ic_launcher"
+            android:targetActivity=".Inst5Activity"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".Inst6Alias"
+            android:label="@string/inst6_name"
+            android:icon="@drawable/ic_launcher"
+            android:targetActivity=".Inst6Activity"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity
+            android:name=".UpdateActivity"
+            android:exported="false" />
+
         <service
             android:name=".ServerService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Runs a local Node.js server hosting the SillyTavern web UI" />
+                android:value="Runs local Node.js servers hosting SillyTavern instances" />
         </service>
     </application>
 

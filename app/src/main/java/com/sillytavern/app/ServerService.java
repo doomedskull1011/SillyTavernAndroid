@@ -17,30 +17,54 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Foreground service that runs the bundled Node.js runtime with the
- * SillyTavern server (server.js). Server output is mirrored to a log
- * file so the UI can display startup progress.
+ * Foreground service that runs one bundled Node.js process per started
+ * SillyTavern instance, all sharing the same extracted payload with
+ * per-instance --port/--dataRoot/--configPath arguments. Server output of
+ * each instance is mirrored to its own log file so the UI can display
+ * startup progress. A single persistent notification summarizes all
+ * running instances and offers a stop-all action.
  */
 public class ServerService extends Service {
 
     public static final String ACTION_START = "com.sillytavern.app.START";
     public static final String ACTION_STOP = "com.sillytavern.app.STOP";
-    public static final String LOG_FILE_NAME = "server.log";
+    public static final String EXTRA_INSTANCE_ID = "instance_id";
 
     private static final String CHANNEL_ID = "server";
     private static final int NOTIFICATION_ID = 1;
     private static final String TAG = "ServerService";
 
-    private static Process nodeProcess;
-    private Thread logThread;
+    private static final Map<Integer, Process> processes = new ConcurrentHashMap<>();
+    private static final Map<Integer, Integer> pids = new ConcurrentHashMap<>();
     private PowerManager.WakeLock wakeLock;
+    private NotificationManager notificationManager;
 
-    public static boolean isRunning() {
-        return nodeProcess != null && nodeProcess.isAlive();
+    public static boolean isRunning(int instanceId) {
+        Process p = processes.get(instanceId);
+        return p != null && p.isAlive();
+    }
+
+    /** Ids of all currently running instances, sorted ascending. */
+    public static ArrayList<Integer> runningIds() {
+        ArrayList<Integer> ids = new ArrayList<>();
+        for (Map.Entry<Integer, Process> e : processes.entrySet()) {
+            if (e.getValue() != null && e.getValue().isAlive()) {
+                ids.add(e.getKey());
+            }
+        }
+        ids.sort(null);
+        return ids;
+    }
+
+    public static int pidOf(int instanceId) {
+        Integer pid = pids.get(instanceId);
+        return pid == null ? -1 : pid;
     }
 
     @Override
@@ -51,43 +75,35 @@ public class ServerService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            stopServer();
-            stopSelf();
+            int id = intent.getIntExtra(EXTRA_INSTANCE_ID, -1);
+            if (id > 0) {
+                stopInstance(id);
+            } else {
+                stopAll();
+            }
+            if (runningIds().isEmpty()) {
+                stopSelf();
+            } else {
+                updateNotification();
+            }
             return START_NOT_STICKY;
         }
+        int id = intent != null ? intent.getIntExtra(EXTRA_INSTANCE_ID, 1) : 1;
         startForegroundWithNotification();
-        if (isRunning()) {
+        if (isRunning(id)) {
             return START_STICKY;
         }
-        startServer();
+        startInstance(id);
         return START_STICKY;
     }
 
     private void startForegroundWithNotification() {
-        NotificationManager nm = getSystemService(NotificationManager.class);
+        notificationManager = getSystemService(NotificationManager.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            nm.createNotificationChannel(new NotificationChannel(
+            notificationManager.createNotificationChannel(new NotificationChannel(
                     CHANNEL_ID, getString(R.string.channel_name), NotificationManager.IMPORTANCE_LOW));
         }
-        Intent stopIntent = new Intent(this, ServerService.class).setAction(ACTION_STOP);
-        PendingIntent stopPending = PendingIntent.getService(
-                this, 0, stopIntent, PendingIntent.FLAG_IMMUTABLE);
-        Intent openIntent = new Intent(this, MainActivity.class);
-        PendingIntent openPending = PendingIntent.getActivity(
-                this, 0, openIntent, PendingIntent.FLAG_IMMUTABLE);
-
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
-        Notification notification = builder
-                .setContentTitle("SillyTavern")
-                .setContentText("Local server is running on port 8000")
-                .setSmallIcon(R.drawable.ic_launcher)
-                .setContentIntent(openPending)
-                .addAction(new Notification.Action.Builder(null, "Stop server", stopPending).build())
-                .setOngoing(true)
-                .build();
-
+        Notification notification = buildNotification();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(NOTIFICATION_ID, notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
@@ -96,80 +112,118 @@ public class ServerService extends Service {
         }
     }
 
-    private void startServer() {
-        File appFiles = getFilesDir();
-        File stDir = new File(appFiles, "sillytavern");
-        String nativeLibDir = getApplicationInfo().nativeLibraryDir;
-        File nodeBin = new File(nativeLibDir, "libnodeexec.so");
+    private Notification buildNotification() {
+        Intent stopIntent = new Intent(this, ServerService.class).setAction(ACTION_STOP);
+        PendingIntent stopPending = PendingIntent.getService(
+                this, 0, stopIntent, PendingIntent.FLAG_IMMUTABLE);
+        Intent openIntent = new Intent(this, ManagerActivity.class);
+        PendingIntent openPending = PendingIntent.getActivity(
+                this, 0, openIntent, PendingIntent.FLAG_IMMUTABLE);
 
-        // Unpack the git runtime data (templates, CA certs) if missing or
-        // outdated, then link the git executables (packaged as jniLibs so
-        // they live in the executable nativeLibraryDir) into a PATH dir via
-        // symlinks. Apps targeting SDK 29+ cannot execve() files from their
-        // home directory (SELinux), but nativeLibraryDir (apk_data_file)
-        // is executable - that is how the node binary itself runs.
-        // Failure is non-fatal: SillyTavern falls back to its pure-JS git.
-        File gitDir = new File(appFiles, "git");
-        File gitBinDir = new File(appFiles, "git-bin");
-        boolean gitAvailable = false;
-        try {
-            if (!PayloadExtractor.isGitExtracted(this)) {
-                writeLog("Extracting git runtime...");
-                PayloadExtractor.extractGit(this);
-            }
-            gitAvailable = linkGitBinaries(gitBinDir, nativeLibDir);
-        } catch (Exception e) {
-            Log.e(TAG, "git runtime setup failed", e);
-            writeLog("WARNING: git runtime unavailable: " + e.getMessage());
-        }
-        writeGitConfig(appFiles);
-
-        // Scale the V8 heap to the device: 1/4 of total RAM, clamped to
-        // [1024, 3072] MB. Prevents OOM kills on low-RAM phones while
-        // leaving headroom for the webpack build on large ones.
-        int heapMb = computeNodeHeapMb();
-        writeLog("Starting node (max-old-space-size=" + heapMb + ")");
-
-        ProcessBuilder pb = new ProcessBuilder(nodeBin.getAbsolutePath(),
-                "--max-old-space-size=" + heapMb, "server.js");
-        pb.directory(stDir);
-        pb.redirectErrorStream(true);
-        Map<String, String> env = pb.environment();
-        env.put("HOME", appFiles.getAbsolutePath());
-        env.put("TMPDIR", getCacheDir().getAbsolutePath());
-        env.put("LD_LIBRARY_PATH", nativeLibDir);
-        String basePath = "/system/bin:/system/xbin";
-        if (gitAvailable) {
-            env.put("PATH", gitBinDir.getAbsolutePath() + ":" + basePath);
-            env.put("GIT_EXEC_PATH", gitBinDir.getAbsolutePath());
-            env.put("GIT_TEMPLATE_DIR", new File(gitDir, "share/git-core/templates").getAbsolutePath());
-            env.put("GIT_SSL_CAINFO", new File(gitDir, "etc/tls/cert.pem").getAbsolutePath());
-            env.put("GIT_CONFIG_NOSYSTEM", "1");
-            env.put("GIT_TERMINAL_PROMPT", "0");
+        ArrayList<Integer> ids = runningIds();
+        StringBuilder text = new StringBuilder();
+        if (ids.isEmpty()) {
+            text.append("Starting server...");
         } else {
-            env.put("PATH", basePath);
+            text.append(ids.size() == 1 ? "1 instance running" : ids.size() + " instances running");
+            text.append(" · ");
+            for (int i = 0; i < ids.size(); i++) {
+                if (i > 0) {
+                    text.append(", ");
+                }
+                text.append(":").append(InstanceManager.portOf(ids.get(i)));
+            }
         }
 
-        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sillytavern:server");
-        wakeLock.acquire(12 * 60 * 60 * 1000L);
+        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(this, CHANNEL_ID)
+                : new Notification.Builder(this);
+        return builder
+                .setContentTitle("ST-Manager")
+                .setContentText(text.toString())
+                .setSmallIcon(R.drawable.ic_launcher)
+                .setContentIntent(openPending)
+                .addAction(new Notification.Action.Builder(null, "Stop all", stopPending).build())
+                .setOngoing(true)
+                .build();
+    }
 
+    private void updateNotification() {
+        if (notificationManager != null) {
+            notificationManager.notify(NOTIFICATION_ID, buildNotification());
+        }
+    }
+
+    private void startInstance(int instanceId) {
+        File payload = InstanceManager.payloadDir(this);
+        if (!new File(payload, "server.js").isFile()) {
+            writeLog(instanceId, "FATAL: payload missing, open ST-Manager to repair");
+            stopSelf();
+            return;
+        }
+        InstanceManager.Instance inst = InstanceManager.get(this, instanceId);
+        if (inst == null) {
+            writeLog(instanceId, "FATAL: instance " + instanceId + " is not registered");
+            stopSelf();
+            return;
+        }
         try {
-            nodeProcess = pb.start();
+            InstanceManager.ensureInstanceDirs(this, inst);
         } catch (Exception e) {
-            Log.e(TAG, "Failed to start node", e);
-            writeLog("FATAL: cannot start node: " + e);
+            writeLog(instanceId, "FATAL: " + e.getMessage());
             stopSelf();
             return;
         }
 
-        logThread = new Thread(() -> {
+        boolean gitAvailable = Env.ensureGitReady(this);
+        if (!gitAvailable) {
+            writeLog(instanceId, "WARNING: git runtime unavailable, using built-in JS git");
+        }
+        Env.writeGitConfig(this);
+
+        // Scale the V8 heap to the device: 1/4 of total RAM, clamped to
+        // [768, 2048] MB per instance. The cap only limits growth, it is
+        // not pre-allocated, so several instances can coexist.
+        int heapMb = computeNodeHeapMb();
+        File dataRoot = InstanceManager.dataRoot(this, instanceId);
+        File config = InstanceManager.configFile(this, instanceId);
+        writeLog(instanceId, "Starting instance " + instanceId + " on port " + inst.port
+                + " (max-old-space-size=" + heapMb + ")");
+
+        ProcessBuilder pb = new ProcessBuilder(Env.nodeBinary(this),
+                "--max-old-space-size=" + heapMb, "server.js",
+                "--port", String.valueOf(inst.port),
+                "--dataRoot", dataRoot.getAbsolutePath(),
+                "--configPath", config.getAbsolutePath());
+        pb.directory(payload);
+        pb.redirectErrorStream(true);
+        Env.apply(this, pb.environment(), gitAvailable);
+
+        acquireWakeLock();
+
+        Process proc;
+        try {
+            proc = pb.start();
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to start node", e);
+            writeLog(instanceId, "FATAL: cannot start node: " + e);
+            if (runningIds().isEmpty()) {
+                stopSelf();
+            }
+            return;
+        }
+        processes.put(instanceId, proc);
+        pids.put(instanceId, resolvePid(proc, dataRoot));
+        updateNotification();
+
+        final Process nodeProcess = proc;
+        Thread logThread = new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(nodeProcess.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    Log.i(TAG, line);
-                    writeLog(line);
+                    Log.i(TAG, "[" + instanceId + "] " + line);
+                    writeLog(instanceId, line);
                 }
             } catch (Exception e) {
                 Log.e(TAG, "log reader ended", e);
@@ -181,52 +235,60 @@ public class ServerService extends Service {
         new Thread(() -> {
             try {
                 int code = nodeProcess.waitFor();
-                writeLog("Server process exited with code " + code);
+                writeLog(instanceId, "Server process exited with code " + code);
             } catch (InterruptedException ignored) {
             }
-            stopSelf();
+            processes.remove(instanceId);
+            pids.remove(instanceId);
+            if (runningIds().isEmpty()) {
+                releaseWakeLock();
+                stopSelf();
+            } else {
+                updateNotification();
+            }
         }).start();
     }
 
     /**
-     * Creates gitBinDir with symlinks named after the git executables,
-     * pointing at the lib*.so copies in nativeLibraryDir. Returns true when
-     * all links resolve to existing executable targets.
+     * Resolves the OS pid of a spawned process. Android's ProcessImpl keeps
+     * it in a private "pid" field; if reflection fails we scan /proc for a
+     * node process whose cmdline references this instance's data root.
      */
-    private boolean linkGitBinaries(File gitBinDir, String nativeLibDir) {
-        String[][] links = {
-                {"git", "libgitexec.so"},
-                {"git-remote-http", "libgitremotehttp.so"},
-                {"git-remote-https", "libgitremotehttps.so"},
-        };
-        if (!gitBinDir.isDirectory() && !gitBinDir.mkdirs()) {
-            return false;
+    private int resolvePid(Process proc, File dataRoot) {
+        try {
+            Field f = proc.getClass().getDeclaredField("pid");
+            f.setAccessible(true);
+            int pid = f.getInt(proc);
+            if (pid > 0) {
+                return pid;
+            }
+        } catch (Exception ignored) {
         }
-        for (String[] link : links) {
-            File target = new File(nativeLibDir, link[1]);
-            File symlink = new File(gitBinDir, link[0]);
-            if (!target.isFile()) {
-                writeLog("WARNING: missing git binary " + target.getAbsolutePath());
-                return false;
-            }
-            try {
-                if (symlink.exists()) {
-                    symlink.delete();
+        try {
+            String needle = dataRoot.getAbsolutePath();
+            File procDir = new File("/proc");
+            File[] entries = procDir.listFiles();
+            if (entries != null) {
+                for (File entry : entries) {
+                    if (!Character.isDigit(entry.getName().charAt(0))) {
+                        continue;
+                    }
+                    try {
+                        byte[] buf = new byte[4096];
+                        try (java.io.FileInputStream in =
+                                     new java.io.FileInputStream(new File(entry, "cmdline"))) {
+                            int n = in.read(buf);
+                            if (n > 0 && new String(buf, 0, n).contains(needle)) {
+                                return Integer.parseInt(entry.getName());
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    }
                 }
-                if (!symlink.exists()) {
-                    android.system.Os.symlink(target.getAbsolutePath(), symlink.getAbsolutePath());
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "symlink failed for " + link[0], e);
-                writeLog("WARNING: git symlink failed: " + e.getMessage());
-                return false;
             }
-            if (!symlink.canExecute()) {
-                writeLog("WARNING: git symlink not executable: " + symlink.getAbsolutePath());
-                return false;
-            }
+        } catch (Exception ignored) {
         }
-        return true;
+        return -1;
     }
 
     private int computeNodeHeapMb() {
@@ -235,45 +297,46 @@ public class ServerService extends Service {
             ActivityManager.MemoryInfo info = new ActivityManager.MemoryInfo();
             am.getMemoryInfo(info);
             long totalMb = info.totalMem / (1024 * 1024);
-            return (int) Math.max(1024, Math.min(3072, totalMb / 4));
+            return (int) Math.max(768, Math.min(2048, totalMb / 4));
         } catch (Exception e) {
-            return 1536;
+            return 1024;
         }
     }
 
-    /**
-     * Pre-seed a global git identity so operations that need one (e.g.
-     * merges during "git pull") never fail on a missing config.
-     */
-    private void writeGitConfig(File appFiles) {
-        File gitconfig = new File(appFiles, ".gitconfig");
-        if (gitconfig.exists()) {
-            return;
-        }
-        String content = "[user]\n"
-                + "\tname = SillyTavern\n"
-                + "\temail = sillytavern@localhost\n"
-                + "[init]\n"
-                + "\tdefaultBranch = main\n";
-        try (FileOutputStream fos = new FileOutputStream(gitconfig)) {
-            fos.write(content.getBytes(StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            Log.w(TAG, "could not write .gitconfig", e);
-        }
-    }
-
-    private void writeLog(String line) {
-        try (FileOutputStream fos = new FileOutputStream(new File(getFilesDir(), LOG_FILE_NAME), true)) {
+    private void writeLog(int instanceId, String line) {
+        File log = InstanceManager.logFile(this, instanceId);
+        log.getParentFile().mkdirs();
+        try (FileOutputStream fos = new FileOutputStream(log, true)) {
             fos.write((line + "\n").getBytes());
         } catch (Exception ignored) {
         }
     }
 
-    private void stopServer() {
-        if (nodeProcess != null) {
-            nodeProcess.destroy();
-            nodeProcess = null;
+    private void stopInstance(int instanceId) {
+        Process p = processes.remove(instanceId);
+        pids.remove(instanceId);
+        if (p != null) {
+            p.destroy();
         }
+    }
+
+    private void stopAll() {
+        for (Integer id : new ArrayList<>(processes.keySet())) {
+            stopInstance(id);
+        }
+        releaseWakeLock();
+    }
+
+    private void acquireWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            return;
+        }
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sillytavern:server");
+        wakeLock.acquire(12 * 60 * 60 * 1000L);
+    }
+
+    private void releaseWakeLock() {
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
@@ -281,7 +344,7 @@ public class ServerService extends Service {
 
     @Override
     public void onDestroy() {
-        stopServer();
+        stopAll();
         super.onDestroy();
     }
 }

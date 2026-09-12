@@ -29,3 +29,6 @@ runtime/gitstage/
 # OS/editor noise
 .DS_Store
 Thumbs.db
+
+# Built release artifacts (published via GitHub Releases)
+*.apk
