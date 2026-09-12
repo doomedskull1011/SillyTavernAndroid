@@ -1,6 +1,6 @@
 # SillyTavernAndroid (ST-Manager)
 
-SillyTavernAndroid packages [SillyTavern](https://github.com/SillyTavern/SillyTavern) 1.18.0 as a self-contained Android app. It runs a real Node.js server inside the app and shows the SillyTavern web UI in a full-screen WebView.
+SillyTavernAndroid packages [SillyTavern](https://github.com/SillyTavern/SillyTavern) as a self-contained Android app. It runs a real Node.js server inside the app and shows the SillyTavern web UI in a full-screen WebView.
 
 Version 2.0 turns the app into **ST-Manager**: a manager for up to **6 SillyTavern instances** running side by side on different ports, each with its own launcher icon, private data, backup import and on-device update tooling. Because SillyTavern itself can now be updated on-device straight from GitHub, the app version no longer tracks the bundled SillyTavern version.
 
