@@ -2,7 +2,7 @@
 
 SillyTavernAndroid packages [SillyTavern](https://github.com/SillyTavern/SillyTavern) as a self-contained Android app. It runs a real Node.js server inside the app and shows the SillyTavern web UI in a full-screen WebView.
 
-Version 2.0 turns the app into **ST-Manager**: a manager for up to **6 SillyTavern instances** running side by side on different ports, each with its own launcher icon, private data, backup import and on-device update tooling. Because SillyTavern itself can now be updated on-device straight from GitHub, the app version no longer tracks the bundled SillyTavern version.
+Version 2.0 turns the app into **ST-Manager**: a manager for up to **6 SillyTavern instances** running side by side on different ports, private data, backup import and on-device update tooling. Because SillyTavern itself can now be updated on-device straight from GitHub, the app version no longer tracks the bundled SillyTavern version.
 
 The current release is built as:
 
@@ -40,7 +40,6 @@ This is not a thin web wrapper around a remote server. The app bundles the runti
 
 - Up to 6 instances, each on its own port (`8000`-`8005`) with its own private data (characters, chats, settings)
 - All instances share one extracted SillyTavern payload, so extra instances cost almost no storage
-- Creating an instance adds a launcher icon (`ST-Inst2`, ...); instance 1 keeps the classic `SillyTavern` icon
 - Per-instance RAM usage, polled live from `/proc/<pid>/status`
 - Per-instance backup import from a SillyTavern `.zip` backup (system file picker)
 - Header toolbar at the top, right beside the `ST-Manager` title, with **Repair**, **Packages** and **Update ST** actions that apply to the shared payload
